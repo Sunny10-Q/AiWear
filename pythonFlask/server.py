@@ -264,7 +264,7 @@ def skill_image()->str:
        print(f"执行skill异常{e}")
        return ""
 
-@app.route("api/skill/image",methods=["POST"])
+@app.route("/api/skill/image", methods=["POST"])
 def skill_image_api():
     try:
         out=skill_image()
