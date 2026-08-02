@@ -180,8 +180,51 @@ def edit_image_tool(image_path:str,instruction:str)->str:
         return json.dumps({"success": False, "error": f"{e}"}, ensure_ascii=False)
 
 
+# 合并两张图片工具
+@tool
+def merge_image_tool(image_path1:str, image_path2:str, instruction:str)->str:
+    """合并两张图片
+    输入两张本地图片路径和合并指令，调用 DashScope 图片编辑模型生成新的 URL。
+    返回 JSON 字符串：{"success":true,"url":"..."} 或
+    {"success":false,"error":"..."}
+    """
+    try:
+        # 读取两张图片
+        with open(image_path1, "rb") as f:
+            image_data1 = f.read()
+        with open(image_path2, "rb") as f:
+            image_data2 = f.read()
+
+        # 转换为图片数据 URI
+        image_data_uri1 = process_image(image_data1)
+        image_data_uri2 = process_image(image_data2)
+
+        # 构建多图合并请求
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"image": image_data_uri1},
+                    {"image": image_data_uri2},
+                    {"text": instruction},
+                ],
+            }
+        ]
+        params = {
+            "model": "qwen-image-edit-plus",
+            "messages": messages,
+        }
+
+        response = MultiModalConversation.call(**params)
+        url = response["output"]["choices"][0]["message"]["content"][0]["image"]
+        return json.dumps({"success": True, "url": url}, ensure_ascii=False)
+    except Exception as e:
+        print(f"调用合并模型报错：{e}")
+        return json.dumps({"success": False, "error": f"{e}"}, ensure_ascii=False)
+
+
 # 声明工具
-skills_tools=[edit_image_tool]
+skills_tools=[edit_image_tool, merge_image_tool]
 
 # 创建agent
 try:
@@ -191,7 +234,9 @@ try:
         skills=["/skills/"],
         system_prompt=(
             "你是一个智能图片处理助手，你可以调用一个工具: \n"
-            "- edit_image_tool：编辑单张图片 \n"
+            "- edit_image_tool：编辑单张图片；只有收到一个 image_path 时使用它\n"
+            "- merge_image_tool：合并两张图片；收到 image_path1 和 image_path2 时必须使用它\n"
+            "如果同时存在 image_path1 和 image_path2，禁止调用 edit_image_tool。\n"
             "最终的输出格式JSON：{\"success\":true,\"url\":\"字符串类型\"} 或者{\"success\":false,\"error\":\"字符串类型\"}"
         )
     )
@@ -247,16 +292,35 @@ def skill_image()->str:
            "你必须调用一个工具，并且只输出 JSON格式",
            f"instruction:{instruction}"
        ]
-       # 获取客户端发送给服务器的文件
-       data = request.files["file"].read();
-       # 本地保存临时文件
-       p = os.path.join(tmp_dir, f"aiwear_{uuid.uuid4().hex}.bin")
-       # 将data内容写入文件p中
-       with open(p,"wb") as f:
-           f.write(data)
+       # 新功能：file1 + file2 进入两图合并流程
+       file1 = request.files.get("file1")
+       file2 = request.files.get("file2")
+       if file1 is not None or file2 is not None:
+           if file1 is None or file2 is None:
+               return ""
 
-       tem_paths.append(p)
-       prompt_lines.append(f"image_path:{p}")
+           p1 = os.path.join(tmp_dir, f"aiwear_file1_{uuid.uuid4().hex}.bin")
+           p2 = os.path.join(tmp_dir, f"aiwear_file2_{uuid.uuid4().hex}.bin")
+           with open(p1, "wb") as f:
+               f.write(file1.read())
+           with open(p2, "wb") as f:
+               f.write(file2.read())
+
+           tem_paths.extend([p1, p2])
+           prompt_lines.insert(0, "你必须调用 merge_image_tool，并且只输出 JSON 格式")
+           prompt_lines.append(f"image_path1:{p1}")
+           prompt_lines.append(f"image_path2:{p2}")
+       else:
+           # 原有功能：file 进入单图编辑流程
+           data = request.files["file"].read();
+           p = os.path.join(tmp_dir, f"aiwear_{uuid.uuid4().hex}.bin")
+           with open(p,"wb") as f:
+               f.write(data)
+
+           tem_paths.append(p)
+           prompt_lines.insert(0, "你必须调用 edit_image_tool，并且只输出 JSON 格式")
+           prompt_lines.append(f"image_path:{p}")
+
        # 调用大模型进行处理
        out = invoke_agent("\n".join(prompt_lines))
        return out["url"]
@@ -265,9 +329,13 @@ def skill_image()->str:
        return ""
 
 @app.route("/api/skill/image", methods=["POST"])
+@app.route("/api/skill-image", methods=["POST"])
 def skill_image_api():
     try:
         out=skill_image()
+        is_merge_request = "file1" in request.files or "file2" in request.files
+        if is_merge_request:
+            return jsonify({"url": out, "success": True}), 200
         return jsonify(
             {
                 "success": True,
