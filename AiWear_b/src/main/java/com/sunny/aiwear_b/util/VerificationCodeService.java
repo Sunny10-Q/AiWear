@@ -27,7 +27,8 @@ public class VerificationCodeService {
     //生成6位随机验证码
     public String generateCode(){
         Random random = new Random();
-        int code = 100000 + random.nextInt(999999);
+        int code = 100000 + random.nextInt(900000);
+        log.info("本次生成的验证码为：{}",code);
         return String.valueOf(code);
     }
 
@@ -44,6 +45,20 @@ public class VerificationCodeService {
     public boolean hasCode(String email){
         String key = CODE_KEY_PRIFIX + email;
         return redisTemplate.hasKey(key);
+    }
+
+
+    //校验验证码
+    public boolean verifyCode(String email,String code){
+        String key = CODE_KEY_PRIFIX + email;
+        if(redisTemplate.hasKey(key)){
+
+            String oldCode = redisTemplate.opsForValue().get(key);
+            redisTemplate.delete(key);
+            return code.equals(oldCode);
+        }
+        log.warn("验证码不存在或已过期，邮箱{}",email);
+        return false;
     }
 
 }
