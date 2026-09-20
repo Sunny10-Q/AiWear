@@ -2,9 +2,13 @@ import base64
 import json
 import os
 import tempfile
+from threading import Lock
 import uuid
 
 from PIL import Image
+import redis
+import requests
+import torch
 from dashscope import MultiModalConversation
 from deepagents import create_deep_agent
 
@@ -17,6 +21,7 @@ from langchain_core.messages.human import HumanMessage
 from langchain_core.messages.tool import tool_call
 from langchain_core.prompts.chat import ChatPromptTemplate
 from langchain_core.tools import tool
+from transformers import CLIPModel, CLIPProcessor
 
 # 创建Flask应用实例
 app = Flask(__name__)
@@ -25,19 +30,153 @@ app = Flask(__name__)
 load_dotenv()
 API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
+# Redis 配置。环境变量可以覆盖默认值，默认值与本地 Docker Redis 保持一致。
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "16379"))
+REDIS_DATABASE = int(os.getenv("REDIS_DATABASE", "0"))
+REDIS_TIMEOUT_SECONDS = float(os.getenv("REDIS_TIMEOUT_SECONDS", "2"))
+
+# 本地 CLIP 模型目录。模型采用懒加载，避免 Flask 启动时立即占用大量内存。
+CLIP_MODEL_PATH = os.getenv(
+    "CLIP_MODEL_PATH",
+    r"C:\Users\QinXun\.cache\modelscope\models\openai-mirror--clip-vit-base-patch16\snapshots\master",
+)
+CLIP_DEVICE = os.getenv("CLIP_DEVICE", "cpu")
+IMAGE_DOWNLOAD_TIMEOUT_SECONDS = float(os.getenv("IMAGE_DOWNLOAD_TIMEOUT_SECONDS", "30"))
+IMAGE_MAX_SIZE_BYTES = int(os.getenv("IMAGE_MAX_SIZE_BYTES", str(50 * 1024 * 1024)))
+
+_redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    db=REDIS_DATABASE,
+    socket_connect_timeout=REDIS_TIMEOUT_SECONDS,
+    socket_timeout=REDIS_TIMEOUT_SECONDS,
+    decode_responses=True,
+)
+_clip_processor = None
+_clip_model = None
+_clip_lock = Lock()
+
+
+def get_clip_components():
+    """懒加载本地 CLIP 模型，避免服务启动时阻塞。"""
+    global _clip_processor, _clip_model
+
+    if _clip_processor is not None and _clip_model is not None:
+        return _clip_processor, _clip_model
+
+    with _clip_lock:
+        if _clip_processor is None or _clip_model is None:
+            if not os.path.isdir(CLIP_MODEL_PATH):
+                raise FileNotFoundError(f"CLIP模型目录不存在: {CLIP_MODEL_PATH}")
+
+            _clip_processor = CLIPProcessor.from_pretrained(
+                CLIP_MODEL_PATH,
+                local_files_only=True,
+            )
+            _clip_model = CLIPModel.from_pretrained(
+                CLIP_MODEL_PATH,
+                local_files_only=True,
+            )
+            _clip_model.to(CLIP_DEVICE)
+            _clip_model.eval()
+
+    return _clip_processor, _clip_model
+
+
+def download_image_from_oss(oss_url: str) -> bytes:
+    """下载 OSS 图片并限制大小，返回图片二进制内容。"""
+    if not isinstance(oss_url, str) or not oss_url.startswith(("http://", "https://")):
+        raise ValueError("ossUrl 必须是以 http:// 或 https:// 开头的图片地址")
+
+    response = requests.get(
+        oss_url,
+        timeout=(5, IMAGE_DOWNLOAD_TIMEOUT_SECONDS),
+        stream=True,
+    )
+    response.raise_for_status()
+
+    content_length = response.headers.get("Content-Length")
+    if content_length and int(content_length) > IMAGE_MAX_SIZE_BYTES:
+        raise ValueError("远程图片大小超过限制")
+
+    chunks = []
+    total_size = 0
+    for chunk in response.iter_content(chunk_size=1024 * 1024):
+        if not chunk:
+            continue
+        total_size += len(chunk)
+        if total_size > IMAGE_MAX_SIZE_BYTES:
+            raise ValueError("远程图片大小超过限制")
+        chunks.append(chunk)
+
+    image_data = b"".join(chunks)
+    if not image_data:
+        raise ValueError("远程图片内容为空")
+
+    # 提前校验文件确实是可读取的图片。
+    with Image.open(BytesIO(image_data)) as image:
+        image.verify()
+    return image_data
+
+
+def generate_image_embedding(image_data: bytes) -> list[float]:
+    """使用本地 CLIP 模型生成归一化的 512 维图片向量。"""
+    processor, model = get_clip_components()
+
+    with Image.open(BytesIO(image_data)) as image:
+        image = image.convert("RGB")
+
+    inputs = processor(images=image, return_tensors="pt")
+    inputs = {name: value.to(CLIP_DEVICE) for name, value in inputs.items()}
+
+    with torch.inference_mode():
+        # transformers 5.x 的 get_image_features 返回模型输出对象，
+        # 这里直接取视觉编码器的 pooler_output，再经过 CLIP 投影层。
+        vision_outputs = model.vision_model(pixel_values=inputs["pixel_values"])
+        features = model.visual_projection(vision_outputs.pooler_output)
+        features = features / features.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-12)
+
+    embedding = features[0].detach().cpu().tolist()
+    if len(embedding) != 512:
+        raise ValueError(f"CLIP向量维度异常，期望512，实际{len(embedding)}")
+    return embedding
+
+
+def save_image_search_record(user_id, oss_url: str, description: str, embedding: list[float]) -> str:
+    """将图片描述、向量和用户信息保存到 Redis，并建立简单索引。"""
+    image_id = uuid.uuid4().hex
+    record = {
+        "imageId": image_id,
+        "userId": user_id,
+        "ossUrl": oss_url,
+        "description": description,
+        "embedding": embedding,
+        "embeddingDim": len(embedding),
+    }
+
+    record_key = f"image:{image_id}"
+    user_index_key = f"images:user:{user_id}"
+    with _redis_client.pipeline() as pipeline:
+        pipeline.set(record_key, json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+        pipeline.sadd("images:all", image_id)
+        pipeline.sadd(user_index_key, image_id)
+        pipeline.execute()
+    return image_id
+
 # 将图片bytes转换成base_uri
 def process_image(image_data : bytes) -> str:
     # 将字节码转成 可操作的图像字节码对象
     img = Image.open(BytesIO(image_data))
 
-    # 获取文件后缀
-    image_format = (img.format).lower()
+    # 获取图片 MIME 类型，确保发送给多模态模型的是合法 data URI。
+    image_mime = Image.MIME.get(img.format, "image/jpeg")
 
     # 获得base64字节码
     image_base64 = base64.b64encode(image_data).decode("utf-8")
 
     # 拼接uri
-    data_uri = f"data:{image_format};base64,{image_base64}"
+    data_uri = f"data:{image_mime};base64,{image_base64}"
     return data_uri
 
 # 调用大模型生成图片文字描述信息
@@ -63,7 +202,15 @@ def describe_image(image_data : bytes) -> str:
         )
         # 4. 把访问大模型得到的结果进行处理返回
         resp = vl_llm.invoke([HumanMessage(content=human_content)])
-        return resp.content[0]['text']
+        if isinstance(resp.content, str):
+            return resp.content.strip()
+        if isinstance(resp.content, list):
+            return "".join(
+                item.get("text", "")
+                for item in resp.content
+                if isinstance(item, dict)
+            ).strip()
+        return str(resp.content).strip()
     except Exception as e :
         print(f"生成图片的文字描述信息出现异常:{e}")
         return ""
@@ -120,6 +267,57 @@ def validate_image_api():
     except Exception as e:
         print(f"执行审核图片操作捕获异常:{e}")
         return jsonify({"code":500, "allow": False}), 500
+
+
+@app.route("/api/upload-image", methods=["POST"])
+def upload_image_for_search_api():
+    """接收 OSS 图片地址，生成描述和 CLIP 向量后保存到 Redis。"""
+    try:
+        request_data = request.get_json(silent=True) or {}
+        oss_url = request_data.get("ossUrl")
+        user_id = request_data.get("userId")
+
+        if not isinstance(oss_url, str) or not oss_url.strip():
+            return jsonify({"success": False, "error": "ossUrl不能为空"}), 400
+        if user_id is None or str(user_id).strip() == "":
+            return jsonify({"success": False, "error": "userId不能为空"}), 400
+
+        # Java 上传成功后传入的是 OSS 地址，Python 服务负责下载图片内容。
+        image_data = download_image_from_oss(oss_url.strip())
+
+        # 使用 qwen-vl-max 生成可用于文搜图的文字描述。
+        description = describe_image(image_data)
+        if not description:
+            raise RuntimeError("生成图片描述失败")
+
+        # 使用本地 CLIP 模型生成可用于图搜图的 512 维向量。
+        embedding = generate_image_embedding(image_data)
+
+        # 描述、向量、用户 ID 和 OSS 地址统一保存为一条 JSON 记录。
+        image_id = save_image_search_record(
+            user_id=user_id,
+            oss_url=oss_url.strip(),
+            description=description,
+            embedding=embedding,
+        )
+
+        return jsonify(
+            {
+                "description": description,
+                "embeddingDim": len(embedding),
+                "imageId": image_id,
+                "success": True,
+            }
+        ), 200
+    except requests.HTTPError as e:
+        print(f"下载 OSS 图片失败：{e}")
+        return jsonify({"success": False, "error": "无法下载 OSS 图片，请检查图片地址和访问权限"}), 502
+    except redis.RedisError as e:
+        print(f"保存图片搜索记录到 Redis 失败：{e}")
+        return jsonify({"success": False, "error": "图片搜索记录保存失败"}), 503
+    except Exception as e:
+        print(f"处理图片搜索数据失败：{e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 
