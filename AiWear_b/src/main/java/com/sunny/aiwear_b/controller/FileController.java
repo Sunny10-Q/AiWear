@@ -1,18 +1,22 @@
 package com.sunny.aiwear_b.controller;
 
 import com.sunny.aiwear_b.common.Result;
+import com.sunny.aiwear_b.dto.request.EditImageRequest;
+import com.sunny.aiwear_b.dto.request.SearchImageRequest;
+import com.sunny.aiwear_b.dto.response.EditImageResponse;
 import com.sunny.aiwear_b.dto.response.FileUploadResponse;
+import com.sunny.aiwear_b.dto.response.SearchImageResponse;
+import com.sunny.aiwear_b.entity.FileRecord;
 import com.sunny.aiwear_b.log.ApiLog;
 import com.sunny.aiwear_b.service.FileService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestPart;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.util.List;
 
 /**
  * 文件接口控制器。
@@ -49,4 +53,61 @@ public class FileController {
             return Result.serverError("图片上传失败，请稍后重试");
         }
     }
+
+
+    /**
+     * 获取图片列表
+     * @param authorization
+     * @return
+     */
+    @ApiLog
+    @GetMapping("/my-images")
+    public Result<List<FileRecord>> getMyImages(@RequestHeader(value = "Authorization") String authorization){
+        List<FileRecord> fileRecords=fileService.myImages(authorization);
+        return Result.success("查询成功",fileRecords);
+    }
+
+
+    /**
+     * 图片搜索（支持文搜图和图搜图）
+     * @param authorization
+     * @param query
+     * @param file
+     * @return
+     */
+    @ApiLog
+    @PostMapping("/search")
+    public Result<List<SearchImageResponse>> search(
+            @RequestHeader(value = "Authorization") String authorization,
+            @RequestParam(value = "query",required = false) String query,
+            @RequestParam(value = "file",required = false) MultipartFile file
+    ){
+        SearchImageRequest searchImageRequest=new SearchImageRequest();
+        searchImageRequest.setQuery(query);
+        searchImageRequest.setFile(file);
+        return Result.success("查询成功",fileService.search(authorization,searchImageRequest));
+
+    }
+
+
+    /**
+     * 图片编辑
+     * @param editImageRequest
+     * @param authorization
+     * @return
+     */
+    @ApiLog
+    @PostMapping("/edit")
+    public Result<EditImageResponse> edit(
+            @RequestBody @Validated EditImageRequest editImageRequest,
+            @RequestHeader(value = "Authorization") String authorization
+    ){
+
+        return Result.success("编辑成功",fileService.edit(authorization,editImageRequest));
+
+    }
+
+
+
+
 }

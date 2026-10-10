@@ -3,7 +3,13 @@ package com.sunny.aiwear_b.service.impl;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.model.ObjectMetadata;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper;
+import com.sunny.aiwear_b.dto.request.EditImageRequest;
+import com.sunny.aiwear_b.dto.request.SearchImageRequest;
+import com.sunny.aiwear_b.dto.response.EditImageResponse;
 import com.sunny.aiwear_b.dto.response.FileUploadResponse;
+import com.sunny.aiwear_b.dto.response.SearchImageResponse;
 import com.sunny.aiwear_b.entity.FileRecord;
 import com.sunny.aiwear_b.mapper.FileMapper;
 import com.sunny.aiwear_b.service.FileService;
@@ -18,8 +24,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
-import java.util.Locale;
-import java.util.UUID;
+import java.util.*;
 
 /**
  * 文件业务服务实现类。
@@ -74,6 +79,11 @@ public class FileServiceImpl implements FileService {
     public FileUploadResponse uploadImage(MultipartFile file, String authorization) {
         // 先校验文件，避免无效文件占用 OSS 资源。
         validateFile(file);
+
+        // 在 OSS 上传之前调用 Python 审核接口，只有审核通过才继续后续流程。
+        if (!validateImage(file)) {
+            throw new IllegalArgumentException("图片未通过审核，仅支持服装、穿搭或人物图片");
+        }
 
         // 从登录令牌中获取当前上传用户，用于写入 files.user_id。
         Long userId = jwtUtil.getUserId(authorization);
@@ -134,6 +144,90 @@ public class FileServiceImpl implements FileService {
             }
         }
     }
+
+    /**
+     * 获取图片列表
+     * @param authorization
+     * @return
+     */
+    @Override
+    public List<FileRecord> myImages(String authorization) {
+
+        // 从登录令牌中获取当前上传用户，用于写入 files.user_id。
+        Long userId = jwtUtil.getUserId(authorization);
+
+        //通过userId拿到当前用户的图片
+        LambdaQueryWrapper<FileRecord> queryWrapper = new LambdaQueryWrapper<>();
+        //按照Id继续倒排（最新上传的在前方）
+        queryWrapper.eq(FileRecord::getUserId, userId).orderByDesc(FileRecord::getId);
+
+        return fileMapper.selectList(queryWrapper);
+    }
+
+    /**
+     * 校验上传的文件
+     * @param file
+     * @return
+     */
+    @Override
+    public boolean validateImage(MultipartFile file) {
+        // 将 MultipartFile 交给 PythonImageService，
+        // 由它负责组装 multipart 请求并解析 Flask 返回的 allow 字段。
+        return pythonImageService.validateImage(file);
+    }
+
+    /**
+     * 搜索用户上传的图片
+     * @param authorization
+     * @param searchImageRequest
+     * @return
+     */
+    @Override
+    public List<SearchImageResponse> search(String authorization, SearchImageRequest searchImageRequest) {
+
+        //1.获取用户Id
+        Long userId = jwtUtil.getUserId(authorization);
+
+        //获取当前用户上传的所有图片
+        List<FileRecord> imageFiles = myImages(authorization);
+        Map<String,String> map=new HashMap<>();
+        for(FileRecord imageFile:imageFiles){
+            map.put(imageFile.getOssUrl(),imageFile.getFileName());
+        }
+        //2.调用python服务
+        List<SearchImageResponse> searchImageResponseList =pythonImageService.search(userId,searchImageRequest);
+        for(SearchImageResponse imageResponse:searchImageResponseList){
+            imageResponse.setFileName(map.get(imageResponse.getFilePath()));
+        }
+        //3.封装返回数据
+
+        return searchImageResponseList;
+    }
+
+    /**
+     * 图片编辑
+     * @param authorization
+     * @param editImageRequest
+     * @return
+     */
+    @Override
+    public EditImageResponse edit(String authorization, EditImageRequest editImageRequest) {
+
+        //获取用户Id
+        Long userId = jwtUtil.getUserId(authorization);
+        //获取当前用户上传的所有图片
+        List<FileRecord> imageFiles = myImages(authorization);
+        //判断当前图片地址是否包含在imageFiles的ossUrl字段集合中
+        List<String> urls = imageFiles.stream().map(FileRecord::getOssUrl).toList();
+        if(!urls.contains(editImageRequest.getImage())){
+            throw new RuntimeException("只能编辑自己上传的图片");
+        }
+
+        //调用python服务进行图片编辑
+        EditImageResponse editImageResponse = pythonImageService.edit(userId,editImageRequest);
+        return editImageResponse;
+    }
+
 
     /**
      * 校验文件非空、大小和 MIME 类型。
