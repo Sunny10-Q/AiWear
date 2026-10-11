@@ -16,6 +16,7 @@ import com.sunny.aiwear_b.entity.FileRecord;
 import com.sunny.aiwear_b.mapper.FileMapper;
 import com.sunny.aiwear_b.service.FileService;
 import com.sunny.aiwear_b.service.PythonImageService;
+import com.sunny.aiwear_b.service.RecordService;
 import com.sunny.aiwear_b.util.JwtUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,6 +48,9 @@ public class FileServiceImpl implements FileService {
     /** 用于校验令牌并解析上传用户 ID。 */
     @Autowired
     private JwtUtil jwtUtil;
+
+    @Autowired
+    private RecordService recordService;
 
     /**
      * 图片搜索索引服务。图片上传和数据库入库成功后，再调用 Python 生成描述和向量。
@@ -227,6 +231,9 @@ public class FileServiceImpl implements FileService {
 
         //调用python服务进行图片编辑
         EditImageResponse editImageResponse = pythonImageService.edit(userId,editImageRequest);
+
+        //新增调用记录
+        recordService.editSave(userId,editImageRequest,editImageResponse);
         return editImageResponse;
     }
 
@@ -246,7 +253,11 @@ public class FileServiceImpl implements FileService {
             throw new RuntimeException("只能合并自己上传的图片");
         }
         //调用python服务
-        return pythonImageService.merge(mergeImageRequest);
+        MergeImageResponse mergeImageResponse = pythonImageService.merge(mergeImageRequest);
+        //新增调用记录
+        Long userId = jwtUtil.getUserId(authorization);
+        recordService.mergeSave(userId,mergeImageRequest,mergeImageResponse);
+        return mergeImageResponse;
 
     }
 
