@@ -1,8 +1,10 @@
 package com.sunny.aiwear_b.service;
 
 import com.sunny.aiwear_b.dto.request.EditImageRequest;
+import com.sunny.aiwear_b.dto.request.MergeImageRequest;
 import com.sunny.aiwear_b.dto.request.SearchImageRequest;
 import com.sunny.aiwear_b.dto.response.EditImageResponse;
+import com.sunny.aiwear_b.dto.response.MergeImageResponse;
 import com.sunny.aiwear_b.dto.response.PythonImageProcessResponse;
 import com.sunny.aiwear_b.dto.response.SearchImageResponse;
 import org.springframework.web.multipart.MultipartFile;
@@ -44,10 +46,17 @@ public interface PythonImageService {
     List<SearchImageResponse> search(Long userId, SearchImageRequest searchImageRequest);
 
     /**
-     * 图片搜索
+     * 图片编辑
      * @param userId
      * @param editImageRequest
      * @return
      */
     EditImageResponse edit(Long userId, EditImageRequest editImageRequest);
+
+    /**
+     * 图片合并
+     * @param mergeImageRequest
+     * @return
+     */
+    MergeImageResponse merge(MergeImageRequest mergeImageRequest);
 }

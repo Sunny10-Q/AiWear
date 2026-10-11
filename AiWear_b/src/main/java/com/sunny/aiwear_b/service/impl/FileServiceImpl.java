@@ -6,9 +6,11 @@ import com.aliyun.oss.model.ObjectMetadata;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper;
 import com.sunny.aiwear_b.dto.request.EditImageRequest;
+import com.sunny.aiwear_b.dto.request.MergeImageRequest;
 import com.sunny.aiwear_b.dto.request.SearchImageRequest;
 import com.sunny.aiwear_b.dto.response.EditImageResponse;
 import com.sunny.aiwear_b.dto.response.FileUploadResponse;
+import com.sunny.aiwear_b.dto.response.MergeImageResponse;
 import com.sunny.aiwear_b.dto.response.SearchImageResponse;
 import com.sunny.aiwear_b.entity.FileRecord;
 import com.sunny.aiwear_b.mapper.FileMapper;
@@ -226,6 +228,26 @@ public class FileServiceImpl implements FileService {
         //调用python服务进行图片编辑
         EditImageResponse editImageResponse = pythonImageService.edit(userId,editImageRequest);
         return editImageResponse;
+    }
+
+    /**
+     * 图片合并
+     * @param authorization
+     * @param mergeImageRequest
+     * @return
+     */
+    @Override
+    public MergeImageResponse merge(String authorization, MergeImageRequest mergeImageRequest) {
+        //鉴权：用户只能编辑自己上传的图片
+        List<FileRecord> imageFiles = myImages(authorization);
+        //判断当前图片地址是否包含在imageFiles的ossURL字段集合中
+        List<String> list = imageFiles.stream().map(FileRecord::getOssUrl).toList();
+        if (!list.contains(mergeImageRequest.getImage1())||!list.contains(mergeImageRequest.getImage2())) {
+            throw new RuntimeException("只能合并自己上传的图片");
+        }
+        //调用python服务
+        return pythonImageService.merge(mergeImageRequest);
+
     }
 
 

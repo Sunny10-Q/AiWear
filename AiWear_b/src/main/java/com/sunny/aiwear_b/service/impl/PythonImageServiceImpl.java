@@ -9,6 +9,7 @@ import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSClientBuilder;
 import com.aliyun.oss.model.ObjectMetadata;
 import com.sunny.aiwear_b.dto.request.EditImageRequest;
+import com.sunny.aiwear_b.dto.request.MergeImageRequest;
 import com.sunny.aiwear_b.dto.request.PythonImageProcessRequest;
 // Python 接口的响应对象，负责接收描述、向量维度和处理状态。
 import com.sunny.aiwear_b.dto.request.SearchImageRequest;
@@ -437,6 +438,97 @@ public class PythonImageServiceImpl implements PythonImageService {
             // 无论 Python 调用、下载或 OSS 上传成功与否，都清理临时图片文件。
             deleteTempFile(sourceTemp);
             deleteTempFile(editedTemp);
+        }
+    }
+
+    /**
+     * 图片合并
+     * @param mergeImageRequest
+     * @return
+     */
+    @Override
+    public MergeImageResponse merge(MergeImageRequest mergeImageRequest) {
+        // 图片合并依赖 Python 服务；服务关闭时不能返回伪造的成功结果。
+        if (!enabled) {
+            throw new IllegalStateException("Python 图片处理服务未启用");
+        }
+        if (mergeImageRequest == null) {
+            throw new IllegalArgumentException("图片合并参数不能为空");
+        }
+
+        // 读取两张待合并图片的地址和用户提供的合并指令。
+        String image1 = mergeImageRequest.getImage1();
+        String image2 = mergeImageRequest.getImage2();
+        String instruction = mergeImageRequest.getInstruction();
+        if (image1 == null || image1.isBlank()) {
+            throw new IllegalArgumentException("第一张图片地址不能为空");
+        }
+        if (image2 == null || image2.isBlank()) {
+            throw new IllegalArgumentException("第二张图片地址不能为空");
+        }
+        if (instruction == null || instruction.isBlank()) {
+            throw new IllegalArgumentException("图片合并指令不能为空");
+        }
+
+        // Python 合并接口接收 multipart 文件，因此先将两张源图下载到临时文件。
+        Path sourceTemp1 = null;
+        Path sourceTemp2 = null;
+        Path mergedTemp = null;
+        try {
+            sourceTemp1 = downloadToTempFile(image1);
+            sourceTemp2 = downloadToTempFile(image2);
+
+            // 编辑和合并共用 /api/skill/image 路由；file1、file2 用于区分合并图片。
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            body.add("file1", new FileSystemResource(sourceTemp1));
+            body.add("file2", new FileSystemResource(sourceTemp2));
+            body.add("instruction", instruction.trim());
+
+            // 设置 multipart/form-data，boundary 由 RestTemplate 自动生成。
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+            HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+            // 调用 Python 图片处理接口并读取其 JSON 响应。
+            ResponseEntity<String> response = restTemplate.postForEntity(
+                    editImageEndpoint, requestEntity, String.class);
+            if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
+                throw new IllegalStateException("Python 图片合并服务返回了无效响应，HTTP状态码="
+                        + response.getStatusCode().value());
+            }
+
+            JsonNode result = objectMapper.readTree(response.getBody());
+            if (!result.path("success").asBoolean(false)) {
+                String error = result.path("error").asText("未知错误");
+                throw new IllegalStateException("Python 图片合并失败：" + error);
+            }
+
+            // Python 返回的 url 是生成结果的临时地址；下载后再保存到业务 OSS。
+            String pythonUrl = result.path("url").asText("").trim();
+            if (pythonUrl.isBlank()) {
+                throw new IllegalStateException("Python 图片合并服务没有返回结果图片地址");
+            }
+            mergedTemp = downloadToTempFile(pythonUrl);
+
+            // 将生成图片上传至业务 OSS，得到长期保存地址。
+            String extension = getImageExtension(mergedTemp);
+            String contentType = getImageContentType(mergedTemp, extension);
+            String savedOssUrl = uploadEditedImageToOss(mergedTemp, extension, contentType);
+
+            // url 保留 Python 生成地址，saveUrl 返回持久化后的 OSS 地址。
+            MergeImageResponse mergeImageResponse = new MergeImageResponse();
+            mergeImageResponse.setUrl(pythonUrl);
+            mergeImageResponse.setSaveUrl(savedOssUrl);
+            return mergeImageResponse;
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Python 图片合并服务返回了无效 JSON", e);
+        } catch (IOException e) {
+            throw new IllegalStateException("读取或上传合并后的图片失败", e);
+        } finally {
+            // 无论成功或失败，都清理两张源图和合并结果的本地临时文件。
+            deleteTempFile(sourceTemp1);
+            deleteTempFile(sourceTemp2);
+            deleteTempFile(mergedTemp);
         }
     }
 

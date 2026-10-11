@@ -2,9 +2,11 @@ package com.sunny.aiwear_b.controller;
 
 import com.sunny.aiwear_b.common.Result;
 import com.sunny.aiwear_b.dto.request.EditImageRequest;
+import com.sunny.aiwear_b.dto.request.MergeImageRequest;
 import com.sunny.aiwear_b.dto.request.SearchImageRequest;
 import com.sunny.aiwear_b.dto.response.EditImageResponse;
 import com.sunny.aiwear_b.dto.response.FileUploadResponse;
+import com.sunny.aiwear_b.dto.response.MergeImageResponse;
 import com.sunny.aiwear_b.dto.response.SearchImageResponse;
 import com.sunny.aiwear_b.entity.FileRecord;
 import com.sunny.aiwear_b.log.ApiLog;
@@ -104,8 +106,19 @@ public class FileController {
     ){
 
         return Result.success("编辑成功",fileService.edit(authorization,editImageRequest));
-
     }
+
+    // 图⽚合并
+    @ApiLog
+    @PostMapping("/merge")
+    public Result<MergeImageResponse> merge(
+            @RequestBody @Validated MergeImageRequest mergeImageRequest,
+            @RequestHeader(value = "Authorization") String authorization
+    ) {
+        return Result.success("合并成功", fileService.merge(authorization,
+                mergeImageRequest));
+    }
+
 
 
 

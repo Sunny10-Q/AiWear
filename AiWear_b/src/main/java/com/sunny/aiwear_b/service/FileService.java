@@ -1,9 +1,11 @@
 package com.sunny.aiwear_b.service;
 
 import com.sunny.aiwear_b.dto.request.EditImageRequest;
+import com.sunny.aiwear_b.dto.request.MergeImageRequest;
 import com.sunny.aiwear_b.dto.request.SearchImageRequest;
 import com.sunny.aiwear_b.dto.response.EditImageResponse;
 import com.sunny.aiwear_b.dto.response.FileUploadResponse;
+import com.sunny.aiwear_b.dto.response.MergeImageResponse;
 import com.sunny.aiwear_b.dto.response.SearchImageResponse;
 import com.sunny.aiwear_b.entity.FileRecord;
 import org.springframework.web.multipart.MultipartFile;
@@ -56,4 +58,12 @@ public interface FileService {
      * @return
      */
     EditImageResponse edit(String authorization, EditImageRequest editImageRequest);
+
+    /**
+     * 图片合并
+     * @param authorization
+     * @param mergeImageRequest
+     * @return
+     */
+    MergeImageResponse merge(String authorization, MergeImageRequest mergeImageRequest);
 }
